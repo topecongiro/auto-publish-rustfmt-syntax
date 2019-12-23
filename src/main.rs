@@ -18,12 +18,19 @@ const CRATES_WHICH_REQUIRES_RUSTC_PRIVATE_FEATURES: &[&str] =
 
 #[derive(Debug, StructOpt)]
 struct Opt {
+    /// A path to the root directory of the rust repository.
     #[structopt(long, default_value = "rust-src", parse(from_os_str))]
     root: PathBuf,
+    /// An output directory.
     #[structopt(short, long, default_value = "rustfmt-syntax", parse(from_os_str))]
     out: PathBuf,
+    /// Remove the output directory if it already exists.
     #[structopt(short, long)]
     force: bool,
+    /// A path to the root directory of the previous version.
+    #[structopt(short, long, parse(from_os_str))]
+    previous: Option<PathBuf>,
+    /// Crates which should be extracted from the rust repository.
     #[structopt(name = "CRATE", required = true)]
     crates: Vec<String>,
 }
