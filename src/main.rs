@@ -12,7 +12,6 @@ use std::{
 use cargo_metadata::{Metadata, MetadataCommand};
 use structopt::StructOpt;
 use walkdir::WalkDir;
-use std::fs::create_dir_all;
 
 const CRATES_WHICH_REQUIRES_RUSTC_PRIVATE_FEATURES: &[&str] =
     &["rustc_data_structures", "rustc_session"];
@@ -49,7 +48,10 @@ fn main() -> std::io::Result<()> {
     let mut cargo_toml_content = "[workspace]\nmembers = [\n".to_owned();
     for krate in crates_to_copy {
         let to = opt.out.clone().join(krate.root_path.file_name().unwrap());
-        info!("copying {} from {:?} to {:?}", krate.name, krate.root_path, to);
+        info!(
+            "copying {} from {:?} to {:?}",
+            krate.name, krate.root_path, to
+        );
 
         copy_dir_all(&krate.root_path, &to)?;
 
@@ -57,7 +59,12 @@ fn main() -> std::io::Result<()> {
             add_rustc_private_feature(&krate, &to)?;
         }
 
-        cargo_toml_content.push_str(&format!("  \"{}\",\n", krate.root_path.file_name().unwrap().to_string_lossy()));
+        rename_crate(&krate, &to)?;
+
+        cargo_toml_content.push_str(&format!(
+            "  \"{}\",\n",
+            krate.root_path.file_name().unwrap().to_string_lossy()
+        ));
     }
     cargo_toml_content.push_str("]\n");
 
@@ -82,6 +89,7 @@ struct LocalCrate<'a> {
     name: &'a str,
     root_path: &'a Path,
     lib_path: &'a Path,
+    toml_path: &'a Path,
 }
 
 fn get_local_dependencies_of_crate<'a>(
@@ -101,6 +109,7 @@ fn get_local_dependencies_of_crate<'a>(
             .parent()
             .expect("Manifest path's parent directory does not exist"),
         lib_path: package.targets[0].src_path.as_path(),
+        toml_path: package.manifest_path.as_path(),
     };
 
     let local_dependencies = package
@@ -115,10 +124,13 @@ fn get_local_dependencies_of_crate<'a>(
 fn copy_dir_all<P: AsRef<Path>, Q: AsRef<Path>>(from: P, to: Q) -> io::Result<()> {
     for entry in WalkDir::new(from.as_ref()) {
         let entry = entry?;
-        let relative_source_path = entry.path().strip_prefix(from.as_ref()).expect("Invalid path");
+        let relative_source_path = entry
+            .path()
+            .strip_prefix(from.as_ref())
+            .expect("Invalid path");
         let target_path = to.as_ref().to_path_buf().join(relative_source_path);
         if entry.file_type().is_dir() {
-            create_dir_all(target_path)?;
+            fs::create_dir_all(target_path)?;
         } else {
             fs::copy(entry.path(), target_path)?;
         }
@@ -137,3 +149,61 @@ fn add_rustc_private_feature(source_krate: &LocalCrate<'_>, to: &Path) -> io::Re
     f.write_all(target_content.as_bytes())
 }
 
+fn add_rustfmt_prefix(name: &str) -> String {
+    if name.starts_with("rustc_") {
+        name.replacen("rustc_", "rustfmt_", 1)
+    } else {
+        format!("rustfmt_{}", name)
+    }
+}
+
+fn rename_crate(krate: &LocalCrate, to: &Path) -> io::Result<()> {
+    let cargo_toml_str = fs::read_to_string(&krate.toml_path)?;
+    let mut raw_value = cargo_toml_str.parse::<toml::Value>()?;
+    let cargo_toml_table = raw_value.as_table_mut().unwrap();
+
+    // Rename the name of this package.
+    {
+        let package = cargo_toml_table
+            .get_mut("package")
+            .expect("no package in Cargo.toml")
+            .as_table_mut()
+            .expect("package is not table");
+        let package_name = package
+            .get("name")
+            .expect("no name in package")
+            .as_str()
+            .unwrap();
+        let new_package_name = add_rustfmt_prefix(package_name);
+        package.insert("name".to_owned(), toml::Value::String(new_package_name));
+    }
+
+    // Rename local dependencies.
+    {
+        if let Some(dependencies) = cargo_toml_table
+            .get_mut("dependencies")
+            .and_then(toml::Value::as_table_mut)
+        {
+            for (dep_name, dep_value) in dependencies {
+                if let Some(dep_table) = dep_value.as_table_mut() {
+                    if dep_table.contains_key("path") {
+                        let new_package_name = add_rustfmt_prefix(
+                            dep_table
+                                .get("package")
+                                .and_then(toml::Value::as_str)
+                                .unwrap_or(dep_name.as_str()),
+                        );
+                        dep_table
+                            .insert("package".to_owned(), toml::Value::String(new_package_name));
+                    }
+                }
+            }
+        }
+    }
+
+    let to_path = to.join("Cargo.toml");
+    let mut f = fs::File::create(&to_path)?;
+    f.write_all(toml::to_string(&raw_value).unwrap().as_bytes())?;
+
+    Ok(())
+}
